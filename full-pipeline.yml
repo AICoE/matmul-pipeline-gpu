@@ -1,0 +1,148 @@
+---
+apiVersion: tekton.dev/v1alpha1
+kind: PipelineResource
+metadata:
+  name: mm-repo
+spec:
+  type: git
+  params:
+    - name: url
+      value: https://github.com/heyselbi/matmul-gpu.git
+---
+apiVersion: tekton.dev/v1alpha1
+kind: PipelineResource
+metadata:
+  name: mm-build-image
+spec:
+  type: image
+  params:
+    - name: url
+      value: quay.io/selbi/matmul-gpu
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mm-runtime-pvc 
+spec:
+  accessModes:
+    - ReadWriteOnce 
+  resources:
+    requests:
+      storage: 12Gi
+  volumeMode: Filesystem
+---
+apiVersion: tekton.dev/v1alpha1
+kind: Task
+metadata:
+  name: mm-buildah
+spec:
+  inputs:
+    params:
+    - name: BUILDER_IMAGE
+      description: The location of the buildah builder image.
+      default: quay.io/buildah/stable:v1.11.0
+    - name: DOCKERFILE
+      description: Path to the Dockerfile to build.
+      default: ./Dockerfile
+    - name: TLSVERIFY
+      description: Verify the TLS on the registry endpoint (for push/pull to a non-TLS registry)
+      default: "false"
+
+    resources:
+    - name: source
+      type: git
+
+  outputs:
+    resources:
+    - name: image
+      type: image
+
+  steps:
+  - name: build
+    image: $(inputs.params.BUILDER_IMAGE)
+    workingDir: /workspace/source
+    volumeMounts:
+    - name: varlibcontainers
+      mountPath: /var/lib/containers
+    command: ["buildah", "bud", '--tls-verify=$(inputs.params.TLSVERIFY)', '--layers', '-f', '$(inputs.params.DOCKERFILE)', '-t', '$(outputs.resources.image.url)', '.']
+    securityContext:
+      privileged: true
+  - name: push
+    image: $(inputs.params.BUILDER_IMAGE)
+    workingDir: /workspace/source
+    volumeMounts:
+    - name: varlibcontainers
+      mountPath: /var/lib/containers
+    command: ['buildah', 'push', '--tls-verify=$(inputs.params.TLSVERIFY)', '$(outputs.resources.image.url)', '$(outputs.resources.image.url)']
+    securityContext:
+      privileged: true
+  
+  volumes:
+  - name: varlibcontainers
+    emptyDir: {}
+---
+apiVersion: tekton.dev/v1alpha1
+kind: Task
+metadata:
+  name: mm-run
+spec:
+  inputs:
+    resources:
+    - name: image
+      type: image
+  steps:
+    - name: run
+      image: $(inputs.resources.image.url)
+      workingDir: /matmul-gpu
+      env:
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: all
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: "compute,utility"
+        - name: NVIDIA_REQUIRE_CUDA  
+          value: "cuda>=5.0"      
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+      volumeMounts:
+        - name: mm-runtime-volume
+          mountPath: /dev/shm
+      securityContext:
+        privileged: true
+        seLinuxOptions:
+          type: nvidia_container_t
+      command: ["python3", "matmul.py", "gpu", "1500"]
+---
+apiVersion: tekton.dev/v1alpha1
+kind: Pipeline
+metadata:
+  name: matmul-pl
+spec:
+  resources:
+    - name: repo
+      type: git
+    - name: build-image
+      type: image 
+  tasks:
+    - name: build
+      taskRef:
+        name: mm-buildah
+        kind: Task
+      resources:
+        inputs:
+          - name: source
+            resource: repo
+        outputs:
+          - name: image
+            resource: build-image
+    - name: run
+      taskRef:
+        name: mm-run
+        kind: Task
+      resources:
+        inputs:
+          - name: image
+            resource: build-image
+      runAfter:
+        - build
+
