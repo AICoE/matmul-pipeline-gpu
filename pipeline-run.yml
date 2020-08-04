@@ -1,0 +1,22 @@
+apiVersion: tekton.dev/v1alpha1
+kind: PipelineRun
+metadata:
+  name: pr-matmul-gpu
+spec:
+  serviceAccountName: matmul
+  pipelineRef:
+    name: matmul-pl
+  timeout: "0"
+  resources:
+  - name: repo
+    resourceRef:
+      name: mm-repo
+  - name: build-image
+    resourceRef:
+      name: mm-build-image
+  podTemplate:
+    volumes:
+    - name: mm-runtime-volume
+      persistentVolumeClaim:
+        claimName: mm-runtime-pvc
+        
